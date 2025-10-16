@@ -1,0 +1,21 @@
+# Python virtual environments
+.venv/
+
+# Environment & secret configuration
+.env
+*.env
+
+# Local SQLite databases and runtime data
+data/
+uploads/
+threads.txt
+
+# Bytecode & cache
+__pycache__/
+.pytest_cache/
+
+# macOS cruft
+.DS_Store
+
+# Generated artifacts
+*.pyc
