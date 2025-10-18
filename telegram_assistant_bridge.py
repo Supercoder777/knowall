@@ -1,5 +1,10 @@
 """Telegram ↔ OpenAI Assistant bridge with function calling and stateful features."""
 
+# Fly.io secrets setup commands:
+# flyctl secrets set TELEGRAM_BOT_TOKEN=your_token
+# flyctl secrets set OPENAI_API_KEY=your_key
+# flyctl secrets set ASSISTANT_ID=asst_xxxx
+
 from __future__ import annotations
 
 import asyncio
@@ -54,9 +59,17 @@ ASSISTANT_INSTRUCTIONS = os.getenv(
 LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").upper()
 
 if not BOT_TOKEN:
-    raise RuntimeError("TELEGRAM_BOT_TOKEN is required")
+    raise RuntimeError(
+        "Missing TELEGRAM_BOT_TOKEN. Set it via Fly secrets: flyctl secrets set TELEGRAM_BOT_TOKEN=your_token"
+    )
 if not OPENAI_API_KEY:
-    raise RuntimeError("OPENAI_API_KEY is required")
+    raise RuntimeError(
+        "Missing OPENAI_API_KEY. Set it via Fly secrets: flyctl secrets set OPENAI_API_KEY=your_key"
+    )
+if not ASSISTANT_ID:
+    raise RuntimeError(
+        "Missing ASSISTANT_ID. Set it via Fly secrets: flyctl secrets set ASSISTANT_ID=asst_xxxx"
+    )
 
 logging.basicConfig(level=getattr(logging, LOG_LEVEL, logging.INFO))
 LOGGER = logging.getLogger(__name__)
@@ -269,37 +282,42 @@ async def _get_or_create_thread(user_id: str) -> Dict[str, Any]:
 
 
 async def _ensure_assistant_exists() -> None:
-    global ASSISTANT_ID
-    if not ASSISTANT_ID:
-        await _create_assistant()
-        return
+    """Validate that the configured assistant exists and supports only allowed tools."""
     try:
         assistant = await client.beta.assistants.retrieve(assistant_id=ASSISTANT_ID)
-    except NotFoundError:
-        _log(logging.WARNING, "Assistant missing; recreating", assistant_id=ASSISTANT_ID)
-        await _create_assistant()
-        return
+    except NotFoundError as exc:  # noqa: BLE001
+        _log(
+            logging.ERROR,
+            "Configured assistant not found; update ASSISTANT_ID secret",
+            assistant_id=ASSISTANT_ID,
+        )
+        raise RuntimeError(
+            "ASSISTANT_ID does not match an existing assistant. Update the Fly secret with a valid ID."
+        ) from exc
 
     tools = getattr(assistant, "tools", None) or []
     if tools:
+        allowed = {"code_interpreter", "file_search", "retrieval"}
+        unsupported = [t for t in tools if getattr(t, "type", None) not in allowed]
+
+        if unsupported:
+            _log(
+                logging.ERROR,
+                "Assistant has unsupported tools configured",
+                assistant_id=ASSISTANT_ID,
+                tools=[getattr(t, "type", str(t)) for t in unsupported],
+            )
+            raise RuntimeError(
+                f"Unsupported tools detected: {[getattr(t, 'type', str(t)) for t in unsupported]}"
+            )
         _log(
-            logging.WARNING,
-            "Assistant has unsupported tools; recreating",
+            logging.INFO,
+            "Assistant tools accepted",
             assistant_id=ASSISTANT_ID,
-            tools=[getattr(tool, "type", str(tool)) for tool in tools],
+            tools=[getattr(t, "type", str(t)) for t in tools],
         )
-        await _create_assistant()
-
-
-async def _create_assistant() -> None:
-    global ASSISTANT_ID
-    assistant = await client.beta.assistants.create(
-        name=ASSISTANT_NAME,
-        model=ASSISTANT_MODEL,
-        instructions=ASSISTANT_INSTRUCTIONS,
-    )
-    ASSISTANT_ID = assistant.id
-    _log(logging.INFO, "Assistant ready", assistant_id=ASSISTANT_ID)
+    else:
+        _log(logging.INFO, "Assistant has no tools configured", assistant_id=ASSISTANT_ID)
 
 
 async def _handle_tool_calls(
@@ -710,6 +728,12 @@ def main() -> None:
 
     application.run_polling()
 
+
+# Fly.io deployment checklist:
+# 1. Set secrets: TELEGRAM_BOT_TOKEN, OPENAI_API_KEY, ASSISTANT_ID
+# 2. Redeploy: flyctl deploy --remote-only
+# 3. Monitor logs: flyctl logs -a telegram-assistant
+# 4. Check status: flyctl status
 
 if __name__ == "__main__":
     main()
